@@ -1,12 +1,10 @@
 """Reproducible training for the uid73 gradient-boosted-trees detector.
 
-Writes model.json (the tree ensemble + offset). Requires the public benchmark
-and sklearn (`pip install -e .`). Usage from the repo root:
+Robust pipeline: winsorize features to the benchmark 1st-99th percentile, then
+gradient boosting. Inference ranks the raw GBM scores within each query batch.
+Requires the public benchmark + sklearn (`pip install -e .`).
 
     python3 poker44_model/train_model.py --data /root/ares/Poker/train/raw
-
-Trains on the benchmark `train` split. Evaluate on the `validation` split with
-the subnet reward metric (0.75*AP + 0.25*recall@FPR<=0.05).
 """
 from __future__ import annotations
 
@@ -52,10 +50,13 @@ def main():
     X = np.array([[extract_group_features(g)[k] for k in FEATURE_NAMES] for g, _ in tr])
     y = np.array([l for _, l in tr])
 
+    lo = np.percentile(X, 1, axis=0)
+    hi = np.percentile(X, 99, axis=0)
+    Xw = np.clip(X, lo, hi)
     gbm = GradientBoostingClassifier(
         n_estimators=200, max_depth=3, learning_rate=0.05,
         subsample=0.85, random_state=0,
-    ).fit(X, y)
+    ).fit(Xw, y)
 
     trees = [export_tree(est) for est in gbm.estimators_[:, 0]]
 
@@ -68,12 +69,14 @@ def main():
             s += tr_["v"][i]
         return s
 
-    f0 = float(np.mean(gbm.decision_function(X) - gbm.learning_rate
-                       * np.array([tree_sum(row) for row in X])))
+    f0 = float(np.mean(gbm.decision_function(Xw) - gbm.learning_rate
+                       * np.array([tree_sum(row) for row in Xw])))
 
     model = {
         "type": "gbm",
         "features": FEATURE_NAMES,
+        "winsor_lo": [round(float(v), 6) for v in lo],
+        "winsor_hi": [round(float(v), 6) for v in hi],
         "lr": float(gbm.learning_rate),
         "F0": round(f0, 6),
         "trees": trees,
